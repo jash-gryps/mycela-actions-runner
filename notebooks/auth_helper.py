@@ -135,7 +135,13 @@ def open_notebook(page, notebook_folder: str, notebook_file: str, alias: str = "
         logger.info(f"[{alias}] Opening notebook")
     folder_enc = quote(notebook_folder, safe="") if notebook_folder else ""
     file_enc = quote(notebook_file, safe="")
-    file_sel = f"a.item_link[href*='{file_enc}']"
+    # Scope to the Files tab (#notebook_list in classic Jupyter) or the JupyterLab
+    # directory listing (.jp-DirListing). This deliberately excludes #running — the
+    # classic Jupyter "Running" tab also renders a.item_link entries for any active
+    # kernel, and those links navigate within the same tab rather than opening a new
+    # one, causing the new-tab detection loop below to time out.
+    file_sel = (f"#notebook_list a.item_link[href*='{file_enc}'], "
+                f".jp-DirListing a.item_link[href*='{file_enc}']")
     ctx = page.context
     try:
         # Enter the folder, then wait for the target file link to appear.
@@ -182,7 +188,13 @@ def _log_open_diagnostics(page, folder_enc, file_enc, alias=""):
             "folder_link_matches": (page.locator(
                 f"a.item_link[href*='{folder_enc}'][href*='/tree/']").count()
                 if folder_enc else "n/a"),
-            "file_link_matches": page.locator(f"a.item_link[href*='{file_enc}']").count(),
+            # Scoped to Files tab only (same selector used for the click above).
+            "file_link_matches": page.locator(
+                f"#notebook_list a.item_link[href*='{file_enc}'], "
+                f".jp-DirListing a.item_link[href*='{file_enc}']").count(),
+            # Running tab count — non-zero here is the root cause of same-tab clicks.
+            "running_tab_matches": page.locator(
+                f"#running a.item_link[href*='{file_enc}']").count(),
             "has_notebook_list": page.locator("#notebook_list").count() > 0,   # classic tree
             "has_jp_dirlisting": page.locator(".jp-DirListing").count() > 0,   # JupyterLab tree
             "has_notebook_container": page.locator("#notebook-container").count() > 0,
