@@ -80,28 +80,15 @@ class Notifier:
                 stage_breakdown: list[str] | None = None,
                 gdrive_link: str = ""):
         """
-        Send a brief success notification.
+        Log stage success — no email sent (failure-only notification policy).
 
-        Args:
-            duration_seconds: Total run duration
-            summary: One-line result summary
-            stage_breakdown: Optional per-stage lines, e.g. ["✓ Login 12s", "✓ JupyterLab 8s"]
-            gdrive_link: Optional Drive folder URL for the run archive
+        Emails are reserved for failures and warnings. Success is logged to the
+        Actions console and recorded in the DB by finalize.py.
         """
-        subject = f"[MYCELA ✓] {self.pipeline} — Stage {self.stage} completed"
-        lines = [
-            f"✓ {self.pipeline} · Stage {self.stage} · {self.tenant_url}",
-            f"Completed in {duration_seconds:.0f}s" + (f" — {summary}" if summary else ""),
-        ]
-        if stage_breakdown:
-            lines.append("")
-            lines.extend(stage_breakdown)
-        if gdrive_link:
-            lines.append("")
-            lines.append(f"Archive: {gdrive_link}")
-        if self.github_run_url:
-            lines.append(self.github_run_url)
-        self._send(subject, "\n".join(lines), is_html=False)
+        logger.info(
+            f"[notify] {self.pipeline} · Stage {self.stage} SUCCESS "
+            f"in {duration_seconds:.0f}s" + (f" — {summary}" if summary else "")
+        )
 
     def failure(self, error: Exception, check_report=None,
                 context: str = "", remediation: str = "needs-investigation"):
