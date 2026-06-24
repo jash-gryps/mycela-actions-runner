@@ -1,0 +1,15 @@
+# Mycela — Notebooks Pipeline Dependencies
+# All versions pinned exactly. Do not use >= or ^.
+# Update one at a time. Run tests after each update.
+
+playwright==1.47.0          # browser automation (replaces Selenium from old repo)
+psycopg2-binary==2.9.9      # Oracle DB driver
+requests==2.32.3            # HTTP client
+google-api-python-client==2.139.0  # Google Drive
+google-auth==2.35.0         # GDrive auth
+anthropic==0.40.0           # Claude Haiku for failure explanations
+groq==0.11.0                # Groq fallback for failure explanations
+pyyaml==6.0.2               # notebooks.yml config
+python-dotenv==1.0.1        # .env loading for local dev
+pytest==8.3.3               # test runner
+pytest-asyncio==0.24.0      # async test support

@@ -1,0 +1,36 @@
+name: Sync cron-job.org
+
+# Re-syncs cron-job.org jobs from Neon (pipeline_display). Run on demand or
+# dispatched by the dashboard after a pause/edit/delete. Each job calls the
+# dashboard's /api/cron/trigger on schedule, which dispatches run_notebook.yml.
+on:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  sync:
+    name: Neon → cron-job.org
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+
+      - name: Install deps
+        run: pip install --quiet psycopg2-binary pyyaml requests
+
+      - name: Generate notebooks.yml from Neon
+        env:
+          DATABASE_URL: ${{ secrets.DATABASE_URL }}
+          DASHBOARD_URL: ${{ vars.DASHBOARD_URL || 'https://mycela.vercel.app' }}
+          CRON_SECRET: ${{ secrets.CRON_SECRET }}
+        run: python scripts/gen_notebooks_yml.py /tmp/notebooks.yml
+
+      - name: Sync to cron-job.org
+        env:
+          CRONJOB_API_KEY: ${{ secrets.CRONJOB_API_KEY }}
+        run: python notebooks/setup_cronjobs.py --config /tmp/notebooks.yml

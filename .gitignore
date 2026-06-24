@@ -1,0 +1,47 @@
+# Python
+__pycache__/
+*.pyc
+*.pyo
+.venv/
+venv/
+*.egg-info/
+.pytest_cache/
+.coverage
+htmlcov/
+
+# Environment — NEVER commit secrets
+.env
+.env.*
+*.env
+*.key
+
+# Data files — NEVER commit notebooks or output data
+*.ipynb
+*.csv
+*.tsv
+*.xlsx
+*.xls
+*.pkl
+*.pickle
+*.parquet
+*.db
+*.sqlite
+*.h5
+*.hdf5
+
+# Run artifacts
+run-history/
+screenshots/
+artifacts/
+*.png
+*.pdf
+*.log
+logs/
+
+# macOS
+.DS_Store
+
+# IDE
+.vscode/
+.idea/
+*.swp
