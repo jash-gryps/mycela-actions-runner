@@ -27,6 +27,11 @@ sys.path.insert(0, str(Path(__file__).parent.parent))
 
 from shared.notify import Notifier
 
+logging.basicConfig(
+    level=logging.INFO,
+    format="%(asctime)s [%(levelname)s] %(message)s",
+    datefmt="%H:%M:%S",
+)
 logger = logging.getLogger(__name__)
 
 STAGE_LABELS = {
@@ -120,6 +125,13 @@ def _record_run_in_db(notebook_id: str, alias: str, run_id: str, run_number: str
     try:
         from shared.db import get_db
         db = get_db()
+        # Log which Neon database we're connected to — helps verify correct DB target
+        try:
+            row = db.fetch_one("SELECT current_database() AS db, current_user AS usr")
+            if row:
+                logger.info(f"[finalize] Connected to DB: db={row['db']} user={row['usr']}")
+        except Exception:
+            pass
         status = "success" if overall == "PASS" else "failure"
         db.execute("""
             INSERT INTO notebook_runs
