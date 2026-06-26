@@ -151,6 +151,9 @@ def open_notebook(page, notebook_folder: str, notebook_file: str, alias: str = "
             ).first.click()
             page.wait_for_selector(file_sel, timeout=JLAB_TIMEOUT_MS)
 
+        # Capture the tree URL before clicking — used for the URL fallback below.
+        tree_url = page.url
+
         # Clicking a notebook in classic Jupyter opens it in a NEW TAB. expect_page
         # can miss it, so poll context.pages and switch to the newly opened tab.
         pages_before = list(ctx.pages)
@@ -162,6 +165,23 @@ def open_notebook(page, notebook_folder: str, notebook_file: str, alias: str = "
                 notebook_page = extra[-1]
                 break
             page.wait_for_timeout(500)
+
+        # If no new tab appeared (click navigated in-place or was a no-op), fall back
+        # to direct URL navigation. This handles notebooks whose kernel is already
+        # running — in classic Jupyter, clicking a running notebook navigates the
+        # current tab in-place rather than opening a new tab, so the poll above finds
+        # nothing and times out. Navigating directly is always safe: a fresh session
+        # reconnects to any existing kernel without data loss.
+        if notebook_page is page:
+            base_url = (tree_url.split('/tree')[0] if '/tree' in tree_url
+                        else tree_url.rstrip('/'))
+            nb_path = (f"{notebook_folder}/{notebook_file}" if notebook_folder
+                       else notebook_file)
+            logger.info(f"[{alias}] No new tab from click — navigating via direct URL")
+            page.goto(f"{base_url}/notebooks/{nb_path}",
+                      wait_until="domcontentloaded",
+                      timeout=NAV_TIMEOUT_MS)
+
         page = notebook_page
 
         # Wait for the notebook UI (classic #notebook-container, or JupyterLab).
