@@ -66,7 +66,11 @@ class CronJobClient:
         resp.raise_for_status()
         return resp.json().get("jobDetails", {})
 
-    def update_job(self, job_id: int, payload: dict) -> dict:
+    def update_job_minimal(self, job_id: int, url: str, title: str, enabled: bool) -> dict:
+        """Minimal PATCH — only update the three fields that need to change.
+        Leaving requestTimeout/schedule/extendedData unchanged avoids plan-limit
+        rejections on fields the server considers out-of-range."""
+        payload = {"job": {"url": url, "title": title, "enabled": enabled}}
         resp = requests.patch(f"{CRONJOB_API_BASE}/jobs/{job_id}", json=payload,
                               headers=self._headers, timeout=30)
         resp.raise_for_status()
@@ -201,7 +205,7 @@ def migrate(config_path: str, dry_run: bool = False) -> None:
                 logger.info(f"[dry-run] UPDATE {new_title} (id={job_id})")
                 continue
             try:
-                client.update_job(job_id, payload)
+                client.update_job_minimal(job_id, new_url, new_title, enabled)
                 logger.info(f"Updated '{new_title}' (id={job_id})")
             except Exception as exc:
                 logger.error(f"FAILED update '{new_title}': {exc}")
@@ -217,7 +221,7 @@ def migrate(config_path: str, dry_run: bool = False) -> None:
                 logger.info(f"[dry-run] MIGRATE '{old_title}' → '{new_title}' (id={job_id})")
                 continue
             try:
-                client.update_job(job_id, payload)
+                client.update_job_minimal(job_id, new_url, new_title, enabled)
                 logger.info(f"Migrated '{old_title}' → '{new_title}' (id={job_id})")
             except Exception as exc:
                 logger.error(f"FAILED migrate '{old_title}': {exc}")
@@ -235,7 +239,7 @@ def migrate(config_path: str, dry_run: bool = False) -> None:
                 logger.info(f"[dry-run] MIGRATE '{slug_match}' → '{new_title}' (id={job_id})")
                 continue
             try:
-                client.update_job(job_id, payload)
+                client.update_job_minimal(job_id, new_url, new_title, enabled)
                 logger.info(f"Migrated '{slug_match}' → '{new_title}' (id={job_id})")
             except Exception as exc:
                 logger.error(f"FAILED migrate '{slug_match}': {exc}")
