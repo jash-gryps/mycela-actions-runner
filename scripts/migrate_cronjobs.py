@@ -56,30 +56,31 @@ class CronJobClient:
             "Content-Type": "application/json",
         }
 
-    def list_jobs(self) -> list[dict]:
-        resp = requests.get(f"{CRONJOB_API_BASE}/jobs", headers=self._headers, timeout=30)
-        resp.raise_for_status()
-        return resp.json().get("jobs", [])
-
-    def get_job(self, job_id: int) -> dict:
-        resp = requests.get(f"{CRONJOB_API_BASE}/jobs/{job_id}", headers=self._headers, timeout=30)
-        resp.raise_for_status()
-        return resp.json().get("jobDetails", {})
-
-    def update_job_minimal(self, job_id: int, url: str, title: str, enabled: bool) -> dict:
-        """Minimal PATCH — only update the three fields that need to change.
-        Retries once on 429 after a 65-second cooldown."""
-        payload = {"job": {"url": url, "title": title, "enabled": enabled}}
-        for attempt in range(2):
-            resp = requests.patch(f"{CRONJOB_API_BASE}/jobs/{job_id}", json=payload,
-                                  headers=self._headers, timeout=30)
-            if resp.status_code == 429 and attempt == 0:
-                logger.warning(f"[rate-limit] 429 on job {job_id} — waiting 65s then retrying")
-                time.sleep(65)
+    def _request(self, method: str, path: str, **kwargs) -> requests.Response:
+        """All HTTP calls go through here — retries up to 3× on 429, waiting 70s each time."""
+        url = f"{CRONJOB_API_BASE}{path}"
+        for attempt in range(4):
+            resp = requests.request(method, url, headers=self._headers, timeout=30, **kwargs)
+            if resp.status_code == 429 and attempt < 3:
+                wait = 70 * (attempt + 1)
+                logger.warning(f"[rate-limit] 429 on {method} {path} — waiting {wait}s (attempt {attempt+1}/3)")
+                time.sleep(wait)
                 continue
             resp.raise_for_status()
-            return resp.json() if resp.content else {}
-        return {}
+            return resp
+        return resp  # unreachable but satisfies type checkers
+
+    def list_jobs(self) -> list[dict]:
+        return self._request("GET", "/jobs").json().get("jobs", [])
+
+    def get_job(self, job_id: int) -> dict:
+        return self._request("GET", f"/jobs/{job_id}").json().get("jobDetails", {})
+
+    def update_job_minimal(self, job_id: int, url: str, title: str, enabled: bool) -> dict:
+        """Minimal PATCH — only url, title, enabled. Leaves schedule/timeout intact."""
+        payload = {"job": {"url": url, "title": title, "enabled": enabled}}
+        resp = self._request("PATCH", f"/jobs/{job_id}", json=payload)
+        return resp.json() if resp.content else {}
 
 
 def _extract_notebook_id_from_url(url: str) -> str | None:
