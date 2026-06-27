@@ -183,7 +183,7 @@ def _build_job_payload(notebook: dict) -> dict:
             "schedule": schedule,
             "requestTimeout": notebook.get("max_execution_minutes", 30) * 60,
             "extendedData": {
-                "headers": [],
+                "headers": {},
                 "body": "",
             }
         }
@@ -216,9 +216,12 @@ def sync_notebooks(config_path: str, dry_run: bool = False):
     logger.info("[cronjobs] Fetching existing jobs from cron-job.org")
     existing_jobs = client.list_jobs()
     existing_by_title = {j["title"]: j for j in existing_jobs if "title" in j}
+    logger.info(f"[cronjobs] Found {len(existing_jobs)} existing job(s): "
+                f"{sorted(existing_by_title.keys())}")
 
     desired_titles = {_job_title(nb) for nb in notebooks}
 
+    errors = []
     # Create or update
     for notebook in notebooks:
         title = _job_title(notebook)
@@ -229,13 +232,17 @@ def sync_notebooks(config_path: str, dry_run: bool = False):
             logger.info(f"[dry-run] {action} {title}")
             continue
 
-        if title in existing_by_title:
-            job_id = existing_by_title[title]["jobId"]
-            client.update_job(job_id, payload)
-            logger.info(f"[cronjobs] Updated '{title}' (id={job_id})")
-        else:
-            client.create_job(payload)
-            logger.info(f"[cronjobs] Created '{title}'")
+        try:
+            if title in existing_by_title:
+                job_id = existing_by_title[title]["jobId"]
+                client.update_job(job_id, payload)
+                logger.info(f"[cronjobs] Updated '{title}' (id={job_id})")
+            else:
+                client.create_job(payload)
+                logger.info(f"[cronjobs] Created '{title}'")
+        except Exception as exc:
+            logger.error(f"[cronjobs] FAILED {title}: {exc}")
+            errors.append((title, str(exc)))
 
     # Delete jobs that are no longer in config (only mycela-owned jobs)
     for title, job in existing_by_title.items():
@@ -243,8 +250,16 @@ def sync_notebooks(config_path: str, dry_run: bool = False):
             if dry_run:
                 logger.info(f"[dry-run] DELETE {title}")
                 continue
-            client.delete_job(job["jobId"])
-            logger.info(f"[cronjobs] Deleted '{title}' (removed from config)")
+            try:
+                client.delete_job(job["jobId"])
+                logger.info(f"[cronjobs] Deleted '{title}' (removed from config)")
+            except Exception as exc:
+                logger.error(f"[cronjobs] FAILED delete '{title}': {exc}")
+                errors.append((title, str(exc)))
+
+    if errors:
+        logger.error(f"[cronjobs] {len(errors)} error(s): {errors}")
+        sys.exit(1)
 
 
 # ── Entry point ───────────────────────────────────────────────────────────────
