@@ -68,13 +68,18 @@ class CronJobClient:
 
     def update_job_minimal(self, job_id: int, url: str, title: str, enabled: bool) -> dict:
         """Minimal PATCH — only update the three fields that need to change.
-        Leaving requestTimeout/schedule/extendedData unchanged avoids plan-limit
-        rejections on fields the server considers out-of-range."""
+        Retries once on 429 after a 65-second cooldown."""
         payload = {"job": {"url": url, "title": title, "enabled": enabled}}
-        resp = requests.patch(f"{CRONJOB_API_BASE}/jobs/{job_id}", json=payload,
-                              headers=self._headers, timeout=30)
-        resp.raise_for_status()
-        return resp.json() if resp.content else {}
+        for attempt in range(2):
+            resp = requests.patch(f"{CRONJOB_API_BASE}/jobs/{job_id}", json=payload,
+                                  headers=self._headers, timeout=30)
+            if resp.status_code == 429 and attempt == 0:
+                logger.warning(f"[rate-limit] 429 on job {job_id} — waiting 65s then retrying")
+                time.sleep(65)
+                continue
+            resp.raise_for_status()
+            return resp.json() if resp.content else {}
+        return {}
 
 
 def _extract_notebook_id_from_url(url: str) -> str | None:
@@ -197,6 +202,7 @@ def migrate(config_path: str, dry_run: bool = False) -> None:
             }
         }
 
+        time.sleep(3)  # stay well under cron-job.org rate limit between writes
         # 1. Already has mycela: title? → skip (already migrated or created fresh)
         if new_title in by_title:
             job_id = by_title[new_title]["jobId"]
