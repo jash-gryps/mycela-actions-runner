@@ -165,27 +165,38 @@ class CronJobClient:
 DEFAULT_TIMEZONE = "America/New_York"
 
 
-def _build_job_payload(notebook: dict) -> dict:
-    """Convert a notebooks.yml entry to a cron-job.org job payload."""
+def _build_schedule(notebook: dict) -> dict:
     # Timezone must be in the schedule object — cron-job.org interprets cron
     # fields in that timezone.  Without it the API defaults to UTC, so a schedule
     # intended for 9 AM EST fires at 9 AM UTC (4–5 hours early).
     schedule = parse_cron(notebook["schedule"])
     schedule["timezone"] = notebook.get("timezone", DEFAULT_TIMEZONE)
+    return schedule
 
+
+def _build_create_payload(notebook: dict) -> dict:
+    """Full payload for PUT (create) — includes timeout + headers."""
     return {
         "job": {
             "url": notebook.get("trigger_url", ""),
             "title": _job_title(notebook),
-            # Respect paused flag — paused notebooks are kept in config but
-            # disabled in cron-job.org so they don't fire on schedule.
             "enabled": not notebook.get("paused", False),
-            "schedule": schedule,
+            "schedule": _build_schedule(notebook),
             "requestTimeout": notebook.get("max_execution_minutes", 30) * 60,
-            "extendedData": {
-                "headers": {},
-                "body": "",
-            }
+            "extendedData": {"headers": {}, "body": ""},
+        }
+    }
+
+
+def _build_update_payload(notebook: dict) -> dict:
+    """Minimal payload for PATCH (update) — cron-job.org rejects requestTimeout
+    and extendedData on PATCH for many plan tiers, causing HTTP 500."""
+    return {
+        "job": {
+            "url": notebook.get("trigger_url", ""),
+            "title": _job_title(notebook),
+            "enabled": not notebook.get("paused", False),
+            "schedule": _build_schedule(notebook),
         }
     }
 
@@ -225,7 +236,6 @@ def sync_notebooks(config_path: str, dry_run: bool = False):
     # Create or update
     for notebook in notebooks:
         title = _job_title(notebook)
-        payload = _build_job_payload(notebook)
 
         if dry_run:
             action = "UPDATE" if title in existing_by_title else "CREATE"
@@ -235,10 +245,10 @@ def sync_notebooks(config_path: str, dry_run: bool = False):
         try:
             if title in existing_by_title:
                 job_id = existing_by_title[title]["jobId"]
-                client.update_job(job_id, payload)
+                client.update_job(job_id, _build_update_payload(notebook))
                 logger.info(f"[cronjobs] Updated '{title}' (id={job_id})")
             else:
-                client.create_job(payload)
+                client.create_job(_build_create_payload(notebook))
                 logger.info(f"[cronjobs] Created '{title}'")
         except Exception as exc:
             logger.error(f"[cronjobs] FAILED {title}: {exc}")
