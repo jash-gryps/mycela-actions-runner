@@ -105,11 +105,37 @@ def _build_stage_breakdown(stage_results: dict[int, str],
     return lines
 
 
-def _record_run_in_db(notebook_id: str, alias: str, run_id: str, run_number: str,
-                      github_run_url: str, overall: str, duration_seconds: int):
+def _detect_code_status(overall: str, stage_results: dict[int, str],
+                        stage_reports: dict[int, dict]) -> str:
     """
-    Upsert the run record. Skips gracefully if DATABASE_URL is unset or the
-    DB is unreachable — the pipeline must not fail because of the database.
+    Classify the run outcome. Always returns a non-None value so code_status
+    is never NULL in the DB.
+
+      'success'    - all stages passed
+      'code_error' - bot worked fine; a notebook cell raised a Python error
+      'bot_error'  - the automation infrastructure itself failed (login, browser, etc.)
+    """
+    if overall != "FAIL":
+        return "success"
+    if any(stage_results.get(s) == "failure" for s in [1, 2, 3]):
+        return "bot_error"
+    if stage_results.get(4) != "failure":
+        return "bot_error"
+    for check in stage_reports.get(4, {}).get("checks", []):
+        if "No cell errors" in check.get("name", "") and check.get("status") == "FAIL":
+            return "code_error"
+    # Stage 4 failed but stage_reports empty or check not found — treat as bot error
+    return "bot_error"
+
+
+def _record_run_in_db(notebook_id: str, alias: str, run_id: str, run_number: str,
+                      github_run_url: str, overall: str, duration_seconds: int,
+                      code_status: str | None = None):
+    """
+    Upsert the run record. Retries up to 3 times on DB failure (Neon cold-start,
+    pool exhaustion, transient timeout). If all attempts fail, logs CRITICAL and
+    prints to stderr — the row will remain stuck as status='running' and must be
+    investigated. Never raises, so the notification step always executes.
     """
     if not os.environ.get("DATABASE_URL", ""):
         logger.warning("[finalize] DATABASE_URL not set — skipping DB record")
@@ -119,35 +145,58 @@ def _record_run_in_db(notebook_id: str, alias: str, run_id: str, run_number: str
         run_id_int = int(run_id) if run_id else 0
         run_number_int = int(run_number) if run_number else 0
     except ValueError:
-        logger.warning(f"[finalize] Non-numeric run identifiers — skipping DB record")
+        logger.warning("[finalize] Non-numeric run identifiers — skipping DB record")
         return
 
-    try:
-        from shared.db import get_db
-        db = get_db()
-        # Log which Neon database we're connected to — helps verify correct DB target
+    status = "success" if overall == "PASS" else "failure"
+    sql = """
+        INSERT INTO notebook_runs
+            (notebook_id, tenant_alias, github_run_id, github_run_number,
+             github_run_url, status, code_status, started_at, finished_at, duration_seconds)
+        VALUES (%s, %s, %s, %s, %s, %s, %s, NOW(), NOW(), %s)
+        ON CONFLICT (notebook_id, github_run_id)
+        DO UPDATE SET
+            status = EXCLUDED.status,
+            code_status = EXCLUDED.code_status,
+            finished_at = EXCLUDED.finished_at,
+            duration_seconds = EXCLUDED.duration_seconds
+    """
+    params = (notebook_id, alias, run_id_int, run_number_int,
+              github_run_url, status, code_status, duration_seconds)
+
+    last_exc = None
+    for attempt in range(1, 4):
         try:
-            row = db.fetch_one("SELECT current_database() AS db, current_user AS usr")
-            if row:
-                logger.info(f"[finalize] Connected to DB: db={row['db']} user={row['usr']}")
-        except Exception:
-            pass
-        status = "success" if overall == "PASS" else "failure"
-        db.execute("""
-            INSERT INTO notebook_runs
-                (notebook_id, tenant_alias, github_run_id, github_run_number,
-                 github_run_url, status, started_at, finished_at, duration_seconds)
-            VALUES (%s, %s, %s, %s, %s, %s, NOW(), NOW(), %s)
-            ON CONFLICT (notebook_id, github_run_id)
-            DO UPDATE SET
-                status = EXCLUDED.status,
-                finished_at = EXCLUDED.finished_at,
-                duration_seconds = EXCLUDED.duration_seconds
-        """, (notebook_id, alias, run_id_int, run_number_int,
-              github_run_url, status, duration_seconds))
-        logger.info(f"[finalize] Recorded run in DB: {notebook_id} #{run_number} → {status}")
-    except Exception as e:
-        logger.error(f"[finalize] DB record failed (continuing): {e}")
+            from shared.db import get_db
+            db = get_db()
+            # Log which Neon database we're connected to — helps verify correct DB target
+            try:
+                row = db.fetch_one("SELECT current_database() AS db, current_user AS usr")
+                if row:
+                    logger.info(f"[finalize] Connected to DB: db={row['db']} user={row['usr']}")
+            except Exception:
+                pass
+            db.execute(sql, params)
+            logger.info(
+                f"[finalize] Recorded run in DB: {notebook_id} #{run_number} → {status}"
+                + (f" [{code_status}]" if code_status else "")
+            )
+            return
+        except Exception as e:
+            last_exc = e
+            logger.warning(f"[finalize] DB write attempt {attempt}/3 failed: {e}")
+            if attempt < 3:
+                time.sleep(5)
+
+    # All retries exhausted — this row will stay stuck as status='running'.
+    msg = (
+        f"[finalize] CRITICAL: all 3 DB write attempts failed for "
+        f"{notebook_id} run #{run_number} (github_run_id={run_id}). "
+        f"Row will remain stuck as status='running'. "
+        f"Last error: {last_exc}"
+    )
+    logger.critical(msg)
+    print(msg, file=sys.stderr)
 
 
 def finalize():
@@ -184,8 +233,9 @@ def finalize():
     )
 
     # ── Record the final run result in the DB (never aborts) ──────────────────
+    code_status = _detect_code_status(overall, stage_results, stage_reports)
     _record_run_in_db(notebook_id, alias, run_id, run_number,
-                      github_run_url, overall, total_duration)
+                      github_run_url, overall, total_duration, code_status)
     gdrive_link = ""  # archive lives in the DB audit table now
 
     # ── 3. Send final notification (always) ───────────────────────────────────
@@ -203,6 +253,20 @@ def finalize():
             stage_breakdown=stage_breakdown,
             gdrive_link=gdrive_link,
         )
+    elif code_status == "code_error":
+        # Bot succeeded (stages 1-4 mechanically fine); a cell raised a Python
+        # error. Distinct from a bot failure so the email is actionable.
+        stage4_report = stage_reports.get(4)
+        notifier.failure(
+            error=RuntimeError(
+                "A cell in the notebook raised a Python error. "
+                "The automation (login, JupyterLab, execution) completed "
+                "successfully — the error is in the notebook's own code."
+            ),
+            check_report=_DictCheckReport(stage4_report) if stage4_report else None,
+            context=f"Run #{run_number} — notebook code error (bot OK)",
+            remediation="needs-investigation",
+        )
     else:
         failed_names = [STAGE_LABELS.get(s, f"Stage {s}") for s in failed_stages]
         error_msg = f"Pipeline failed at: {', '.join(failed_names)}"
@@ -212,7 +276,7 @@ def finalize():
             error=RuntimeError(error_msg),
             check_report=_DictCheckReport(first_failed_report) if first_failed_report else None,
             context=f"Run #{run_number} — failed stages: {failed_names}",
-            remediation="needs-investigation"
+            remediation="needs-investigation",
         )
 
 
