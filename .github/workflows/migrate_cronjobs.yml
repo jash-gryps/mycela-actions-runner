@@ -34,7 +34,7 @@ jobs:
       - name: Generate notebooks.yml from Neon
         env:
           DATABASE_URL: ${{ secrets.DATABASE_URL }}
-          DASHBOARD_URL: ${{ vars.DASHBOARD_URL || 'https://mycela.vercel.app' }}
+          DASHBOARD_URL: ${{ vars.DASHBOARD_URL || 'https://gryps-automation.vercel.app' }}
           CRON_SECRET: ${{ secrets.CRON_SECRET }}
         run: python scripts/gen_notebooks_yml.py /tmp/notebooks.yml
 
@@ -42,7 +42,7 @@ jobs:
         env:
           CRONJOB_API_KEY: ${{ secrets.CRONJOB_API_KEY }}
           CRON_SECRET: ${{ secrets.CRON_SECRET }}
-          DASHBOARD_URL: ${{ vars.DASHBOARD_URL || 'https://mycela.vercel.app' }}
+          DASHBOARD_URL: ${{ vars.DASHBOARD_URL || 'https://gryps-automation.vercel.app' }}
         run: |
           FLAG=""
           if [ "${{ inputs.dry_run }}" = "true" ]; then FLAG="--dry-run"; fi

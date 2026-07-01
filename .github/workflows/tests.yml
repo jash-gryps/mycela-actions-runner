@@ -1,0 +1,28 @@
+name: tests
+
+# Runs the unit test suite (cron parsing, sync idempotency, cron-job.org
+# rate-limit handling). No secrets, no network — pure logic tests.
+on:
+  push:
+    branches: [main]
+  pull_request:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  pytest:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+
+      - name: Install deps
+        run: pip install --quiet pytest pyyaml requests
+
+      - name: Run tests
+        run: python -m pytest tests/ -q

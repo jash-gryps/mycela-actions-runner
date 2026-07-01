@@ -17,7 +17,6 @@ import argparse
 import logging
 import os
 import sys
-import time
 from pathlib import Path
 from typing import Optional
 
@@ -26,13 +25,12 @@ import yaml
 
 sys.path.insert(0, str(Path(__file__).parent.parent))
 
-from shared.retry import check_http_status, RateLimitError, ServerError
+from shared.cronjob_http import request_with_backoff
 
 logger = logging.getLogger(__name__)
 logging.basicConfig(level=logging.INFO, format="%(levelname)s %(message)s")
 
 CRONJOB_API_BASE = "https://api.cron-job.org"
-RATE_LIMIT_DELAYS = [30, 60, 90]  # seconds to wait on successive 429s
 
 
 # ── cron-job.org integer schedule format ─────────────────────────────────────
@@ -139,25 +137,13 @@ class CronJobClient:
         return self._request("DELETE", path)
 
     def _request(self, method: str, path: str, **kwargs) -> dict:
-        url = f"{CRONJOB_API_BASE}{path}"
-        for attempt, delay in enumerate([0] + RATE_LIMIT_DELAYS, start=1):
-            if delay:
-                logger.warning(f"[cronjobs] Rate limited — waiting {delay}s (attempt {attempt}/4)")
-                time.sleep(delay)
-            try:
-                resp = requests.request(method, url, headers=self._headers,
-                                        timeout=30, **kwargs)
-                if resp.status_code == 429:
-                    if attempt <= len(RATE_LIMIT_DELAYS):
-                        continue  # retry with next delay
-                    raise RateLimitError(f"Rate limited after {len(RATE_LIMIT_DELAYS)} retries")
-                check_http_status(resp.status_code, resp.text)
-                return resp.json() if resp.content else {}
-            except RateLimitError:
-                if attempt > len(RATE_LIMIT_DELAYS):
-                    raise
-                continue
-        raise RateLimitError(f"Exhausted rate limit retries for {method} {path}")
+        # Rate-limit handling (Retry-After + jittered backoff) lives in the shared
+        # requester so setup and migrate can never diverge.
+        resp = request_with_backoff(
+            method, f"{CRONJOB_API_BASE}{path}",
+            headers=self._headers, **kwargs,
+        )
+        return resp.json() if resp.content else {}
 
 
 # ── Sync logic ────────────────────────────────────────────────────────────────

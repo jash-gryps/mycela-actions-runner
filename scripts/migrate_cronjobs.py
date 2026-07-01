@@ -20,7 +20,7 @@ Required env vars:
   CRONJOB_API_KEY   cron-job.org API key
   DATABASE_URL      Neon connection string
   CRON_SECRET       New shared secret for trigger URL tokens
-  DASHBOARD_URL     Base URL of the Mycela dashboard (default: https://mycela.vercel.app)
+  DASHBOARD_URL     Base URL of the Mycela dashboard (default: https://gryps-automation.vercel.app)
 
 Usage:
   python scripts/migrate_cronjobs.py --config /tmp/notebooks.yml [--dry-run]
@@ -37,11 +37,15 @@ from urllib.parse import parse_qs, urlparse
 import requests
 import yaml
 
+sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
+
+from shared.cronjob_http import request_with_backoff
+
 logger = logging.getLogger(__name__)
 logging.basicConfig(level=logging.INFO, format="%(levelname)s %(message)s")
 
 CRONJOB_API_BASE = "https://api.cron-job.org"
-DEFAULT_DASHBOARD_URL = "https://mycela.vercel.app"
+DEFAULT_DASHBOARD_URL = "https://gryps-automation.vercel.app"
 
 
 def _notebook_file_to_slug(filename: str) -> str:
@@ -57,18 +61,11 @@ class CronJobClient:
         }
 
     def _request(self, method: str, path: str, **kwargs) -> requests.Response:
-        """All HTTP calls go through here — retries up to 3× on 429, waiting 70s each time."""
-        url = f"{CRONJOB_API_BASE}{path}"
-        for attempt in range(4):
-            resp = requests.request(method, url, headers=self._headers, timeout=30, **kwargs)
-            if resp.status_code == 429 and attempt < 3:
-                wait = 70 * (attempt + 1)
-                logger.warning(f"[rate-limit] 429 on {method} {path} — waiting {wait}s (attempt {attempt+1}/3)")
-                time.sleep(wait)
-                continue
-            resp.raise_for_status()
-            return resp
-        return resp  # unreachable but satisfies type checkers
+        """All HTTP calls go through the shared requester (Retry-After + backoff)."""
+        return request_with_backoff(
+            method, f"{CRONJOB_API_BASE}{path}",
+            headers=self._headers, **kwargs,
+        )
 
     def list_jobs(self) -> list[dict]:
         return self._request("GET", "/jobs").json().get("jobs", [])

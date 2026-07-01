@@ -10,7 +10,7 @@ Each cron-job.org job calls:
 Required env vars:
   DATABASE_URL     Neon connection string
   CRON_SECRET      Shared secret checked by the dashboard trigger route
-  DASHBOARD_URL    Base URL of the Mycela dashboard (default: https://mycela.vercel.app)
+  DASHBOARD_URL    Base URL of the Mycela dashboard (default: https://gryps-automation.vercel.app)
 
 Usage:
   python scripts/gen_notebooks_yml.py /tmp/notebooks.yml
@@ -23,7 +23,7 @@ import psycopg2
 import yaml
 
 
-DEFAULT_DASHBOARD_URL = "https://mycela.vercel.app"
+DEFAULT_DASHBOARD_URL = "https://gryps-automation.vercel.app"
 DEFAULT_MAX_EXECUTION_MINUTES = 30
 
 
