@@ -1,0 +1,44 @@
+name: (controlled) cron-job.org migrate run
+
+# Temporary, controlled harness to re-run the cron-job.org migration from within
+# GitHub Actions (which holds the secrets + has network egress that the dev
+# session does not). Triggers on a push that changes THIS file only, so it does
+# not fire on unrelated commits. DASHBOARD_URL is pinned to production so the
+# result is deterministic regardless of the repo variable. Remove this file once
+# the scheduler is confirmed healthy.
+on:
+  push:
+    branches: [claude/zealous-rubin-vh4bkr]
+    paths: ['.github/workflows/_cron_migrate_run.yml']
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  migrate:
+    name: cron-job.org migrate (DRY-RUN)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+
+      - name: Install deps
+        run: pip install --quiet psycopg2-binary pyyaml requests
+
+      - name: Generate notebooks.yml from Neon
+        env:
+          DATABASE_URL: ${{ secrets.DATABASE_URL }}
+          DASHBOARD_URL: https://gryps-automation.vercel.app
+          CRON_SECRET: ${{ secrets.CRON_SECRET }}
+        run: python scripts/gen_notebooks_yml.py /tmp/notebooks.yml
+
+      - name: Migrate cron-job.org jobs (dry-run — no writes)
+        env:
+          CRONJOB_API_KEY: ${{ secrets.CRONJOB_API_KEY }}
+          CRON_SECRET: ${{ secrets.CRON_SECRET }}
+          DASHBOARD_URL: https://gryps-automation.vercel.app
+        run: python scripts/migrate_cronjobs.py --config /tmp/notebooks.yml --dry-run
