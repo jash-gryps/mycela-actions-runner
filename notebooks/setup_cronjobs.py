@@ -17,6 +17,7 @@ import argparse
 import logging
 import os
 import sys
+import time
 from pathlib import Path
 from typing import Optional
 
@@ -31,6 +32,10 @@ logger = logging.getLogger(__name__)
 logging.basicConfig(level=logging.INFO, format="%(levelname)s %(message)s")
 
 CRONJOB_API_BASE = "https://api.cron-job.org"
+# Space out writes so we stay under cron-job.org's rate limit proactively.
+# Hitting a 429 and waiting out the backoff is far slower than a short pause
+# between calls (the migrate script self-throttles the same way).
+WRITE_THROTTLE_SECONDS = 2.0
 
 
 # ── cron-job.org integer schedule format ─────────────────────────────────────
@@ -235,6 +240,7 @@ def sync_notebooks(config_path: str, dry_run: bool = False):
             logger.info(f"[dry-run] {action} {title}")
             continue
 
+        time.sleep(WRITE_THROTTLE_SECONDS)  # stay under the rate limit proactively
         try:
             if title in existing_by_title:
                 job_id = existing_by_title[title]["jobId"]
@@ -253,6 +259,7 @@ def sync_notebooks(config_path: str, dry_run: bool = False):
             if dry_run:
                 logger.info(f"[dry-run] DELETE {title}")
                 continue
+            time.sleep(WRITE_THROTTLE_SECONDS)
             try:
                 client.delete_job(job["jobId"])
                 logger.info(f"[cronjobs] Deleted '{title}' (removed from config)")

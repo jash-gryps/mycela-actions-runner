@@ -123,6 +123,7 @@ def config_file(tmp_path):
 def test_sync_creates_updates_and_deletes(monkeypatch, config_file):
     monkeypatch.setenv("CRONJOB_API_KEY", "fake-key")
     monkeypatch.setattr(setup_cronjobs, "CronJobClient", FakeClient)
+    monkeypatch.setattr(setup_cronjobs.time, "sleep", lambda s: None)
 
     setup_cronjobs.sync_notebooks(config_file, dry_run=False)
     fake = FakeClient.instance
@@ -137,6 +138,7 @@ def test_sync_creates_updates_and_deletes(monkeypatch, config_file):
 def test_sync_dry_run_makes_no_writes(monkeypatch, config_file):
     monkeypatch.setenv("CRONJOB_API_KEY", "fake-key")
     monkeypatch.setattr(setup_cronjobs, "CronJobClient", FakeClient)
+    monkeypatch.setattr(setup_cronjobs.time, "sleep", lambda s: None)
 
     setup_cronjobs.sync_notebooks(config_file, dry_run=True)
     fake = FakeClient.instance
