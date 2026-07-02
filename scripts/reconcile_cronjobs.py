@@ -107,7 +107,10 @@ def reconcile(config_path: str, dry_run: bool = False) -> None:
         desired_sched = _build_schedule(nb)          # includes timezone America/New_York
         existing = by_title.get(title, [])
 
-        # Is there already exactly one correct job? Then skip (no churn).
+        desired_enabled = not nb.get("paused", False)
+
+        # Is there already exactly one fully-correct job? Then skip (no churn).
+        # "Correct" = right schedule + timezone + trigger id + enabled state.
         correct = None
         for job in existing:
             time.sleep(THROTTLE_SECONDS)
@@ -117,8 +120,13 @@ def reconcile(config_path: str, dry_run: bool = False) -> None:
             except RateLimitError:
                 breaker.record(False)
                 continue
-            if (_schedule_matches(details.get("schedule", {}), desired_sched)
-                    and _id_from_url(details.get("url", "")) == nb_id):
+            sched = details.get("schedule", {})
+            # Diagnostic line: surface the live timezone + enabled for every job.
+            logger.info(f"[live] {title} id={job['jobId']} enabled={details.get('enabled')} "
+                        f"tz={sched.get('timezone')} sched_ok={_schedule_matches(sched, desired_sched)}")
+            if (_schedule_matches(sched, desired_sched)
+                    and _id_from_url(details.get("url", "")) == nb_id
+                    and details.get("enabled") == desired_enabled):
                 correct = job["jobId"]
                 break
 
