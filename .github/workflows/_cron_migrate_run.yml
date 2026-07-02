@@ -36,7 +36,7 @@ jobs:
           CRON_SECRET: ${{ secrets.CRON_SECRET }}
         run: python scripts/gen_notebooks_yml.py /tmp/notebooks.yml
 
-      - name: Migrate legacy jobs → mycela: format (APPLY)
+      - name: Migrate legacy jobs to mycela format (APPLY)
         env:
           CRONJOB_API_KEY: ${{ secrets.CRONJOB_API_KEY }}
           CRON_SECRET: ${{ secrets.CRON_SECRET }}
