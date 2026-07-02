@@ -1,11 +1,9 @@
 name: (controlled) cron-job.org migrate run
 
-# Temporary, controlled harness to repair cron-job.org from within GitHub Actions
-# (which holds the secrets + has the network egress the dev session lacks).
-# APPLY mode: migrate legacy job titles/URLs → mycela: format pointed at prod,
-# then sync to enforce correct schedules/enabled state from Neon. DASHBOARD_URL
-# is pinned to production so the result is deterministic regardless of the repo
-# variable. Remove this file once the scheduler is confirmed healthy.
+# Temporary, controlled harness. Migrate already completed successfully (all 21
+# notebook jobs repointed to prod as mycela:*). This iteration runs the FIXED
+# sync (minimal PATCH — no more 500) and then a read-only diagnostic snapshot so
+# we can confirm final state (schedules, leftover jobs). Remove once healthy.
 on:
   push:
     branches: [claude/zealous-rubin-vh4bkr]
@@ -17,7 +15,7 @@ permissions:
 
 jobs:
   repair:
-    name: cron-job.org repair (APPLY)
+    name: cron-job.org sync + diagnose
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
@@ -36,14 +34,13 @@ jobs:
           CRON_SECRET: ${{ secrets.CRON_SECRET }}
         run: python scripts/gen_notebooks_yml.py /tmp/notebooks.yml
 
-      - name: Migrate legacy jobs to mycela format (APPLY)
-        env:
-          CRONJOB_API_KEY: ${{ secrets.CRONJOB_API_KEY }}
-          CRON_SECRET: ${{ secrets.CRON_SECRET }}
-          DASHBOARD_URL: https://gryps-automation.vercel.app
-        run: python scripts/migrate_cronjobs.py --config /tmp/notebooks.yml
-
-      - name: Sync schedules from Neon (APPLY)
+      - name: Sync schedules from Neon (APPLY, fixed minimal PATCH)
         env:
           CRONJOB_API_KEY: ${{ secrets.CRONJOB_API_KEY }}
         run: python notebooks/setup_cronjobs.py --config /tmp/notebooks.yml
+
+      - name: Diagnose cron-job.org state (read-only)
+        if: always()
+        env:
+          CRONJOB_API_KEY: ${{ secrets.CRONJOB_API_KEY }}
+        run: python scripts/diagnose_cronjobs.py

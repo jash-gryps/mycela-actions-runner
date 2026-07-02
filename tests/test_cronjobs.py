@@ -65,10 +65,12 @@ def test_create_payload_is_full():
 
 
 def test_update_payload_is_minimal():
-    # PATCH must omit requestTimeout/extendedData (cron-job.org 500s on them).
+    # PATCH must omit schedule/requestTimeout/extendedData — cron-job.org 500s
+    # on them. Only url/title/enabled are allowed on PATCH.
     nb = {"id": "harbor-cip", "schedule": "30 * * * *", "trigger_url": "https://x/y"}
     p = setup_cronjobs._build_update_payload(nb)["job"]
-    assert set(p.keys()) == {"url", "title", "enabled", "schedule"}
+    assert set(p.keys()) == {"url", "title", "enabled"}
+    assert "schedule" not in p
 
 
 def test_paused_notebook_disabled():

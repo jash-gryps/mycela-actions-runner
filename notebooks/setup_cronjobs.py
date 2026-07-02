@@ -115,6 +115,10 @@ class CronJobClient:
     def list_jobs(self) -> list[dict]:
         return self._api_get("/jobs").get("jobs", [])
 
+    def get_job(self, job_id: int) -> dict:
+        # The /jobs list omits url + schedule; fetch full details per job.
+        return self._api_get(f"/jobs/{job_id}").get("jobDetails", {})
+
     def create_job(self, payload: dict) -> dict:
         return self._api_put("/jobs", payload)
 
@@ -175,14 +179,17 @@ def _build_create_payload(notebook: dict) -> dict:
 
 
 def _build_update_payload(notebook: dict) -> dict:
-    """Minimal payload for PATCH (update) — cron-job.org rejects requestTimeout
-    and extendedData on PATCH for many plan tiers, causing HTTP 500."""
+    """Minimal payload for PATCH (update) — cron-job.org returns HTTP 500 when a
+    PATCH body carries `schedule` (or requestTimeout/extendedData) on this plan.
+    Confirmed by a repair run: minimal PATCHes succeeded while schedule-bearing
+    PATCHes 500'd for all 21 jobs. So PATCH carries only url/title/enabled;
+    `schedule` is set at CREATE (PUT) time. Changing an existing job's schedule
+    therefore requires delete+recreate — see sync_notebooks()."""
     return {
         "job": {
             "url": notebook.get("trigger_url", ""),
             "title": _job_title(notebook),
             "enabled": not notebook.get("paused", False),
-            "schedule": _build_schedule(notebook),
         }
     }
 
