@@ -1,0 +1,43 @@
+name: (test) scheduler validation
+
+# Temporary: validates schedule_dispatch.py on this branch (schedule/dispatch
+# can't be tested any other way from here). Step 1 = PLAN (DB + due calc, no
+# side effects). Step 2 = force-dispatch ONE notebook in dry-run to prove the
+# GITHUB_TOKEN → run_notebook dispatch works. Remove after validation.
+on:
+  push:
+    branches: [claude/zealous-rubin-vh4bkr]
+    paths: ['.github/workflows/_scheduler_test.yml']
+  workflow_dispatch:
+
+permissions:
+  actions: write
+  contents: read
+
+jobs:
+  validate:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+      - name: Install deps
+        run: pip install --quiet psycopg2-binary croniter
+
+      - name: Plan — DB connectivity + due calc (no dispatch)
+        env:
+          DATABASE_URL: ${{ secrets.DATABASE_URL }}
+          PLAN_ONLY: '1'
+          WINDOW_MINUTES: '5'
+        run: python scripts/schedule_dispatch.py
+
+      - name: Force-dispatch one notebook (dry-run) — prove token dispatch
+        env:
+          DATABASE_URL: ${{ secrets.DATABASE_URL }}
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          GH_REPO: ${{ github.repository }}
+          GH_REF: ${{ github.ref_name }}
+          FORCE_NOTEBOOK: harbor-nb1
+        run: python scripts/schedule_dispatch.py
