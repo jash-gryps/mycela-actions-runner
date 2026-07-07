@@ -22,7 +22,7 @@ jobs:
           python-version: '3.12'
 
       - name: Install deps
-        run: pip install --quiet pytest pyyaml requests
+        run: pip install --quiet pytest pyyaml requests croniter
 
       - name: Run tests
         run: python -m pytest tests/ -q
