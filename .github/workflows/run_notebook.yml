@@ -1,5 +1,5 @@
 name: Run Notebook
-run-name: "pipeline run #${{ github.run_number }}${{ inputs.dry_run && ' (dry run)' || '' }}"
+run-name: "${{ inputs.notebook_id }} @${{ inputs.fire_time }} (#${{ github.run_number }})${{ inputs.dry_run && ' dry' || '' }}"
 
 # ── How to trigger this workflow ──────────────────────────────────────────────
 # Pass opaque identifiers only. The real client URL is resolved from a secret.
@@ -63,6 +63,11 @@ on:
         type: string
       created_by:
         description: "Username of the person who owns this pipeline"
+        required: false
+        default: ""
+        type: string
+      fire_time:
+        description: "Scheduled fire time (YYYY-MM-DDTHH:MM ET) — set by the scheduler; used for dedup via run-name"
         required: false
         default: ""
         type: string

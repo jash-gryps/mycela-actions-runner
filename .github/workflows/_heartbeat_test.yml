@@ -1,0 +1,34 @@
+name: (test) heartbeat validation
+
+# Temporary: validates the catch-up + dedup logic on this branch in PLAN mode
+# (reads Neon, queries run_notebook run history for dedup, logs what it WOULD
+# dispatch — no side effects). Remove after validation.
+on:
+  push:
+    branches: [claude/zealous-rubin-vh4bkr]
+    paths: ['.github/workflows/_heartbeat_test.yml']
+  workflow_dispatch:
+
+permissions:
+  actions: read
+  contents: read
+
+jobs:
+  validate:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+      - name: Install deps
+        run: pip install --quiet psycopg2-binary croniter
+      - name: Plan — catch-up + dedup (read-only)
+        env:
+          DATABASE_URL: ${{ secrets.DATABASE_URL }}
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          GH_REPO: ${{ github.repository }}
+          PLAN_ONLY: '1'
+          MAX_CATCHUP_MINUTES: '120'
+        run: python scripts/schedule_dispatch.py

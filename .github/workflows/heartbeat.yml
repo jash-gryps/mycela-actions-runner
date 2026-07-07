@@ -1,0 +1,68 @@
+name: heartbeat scheduler
+
+# Reliable scheduler that does NOT depend on GitHub's flaky `schedule:` cadence.
+# A single job loops every ~2 min running the catch-up dispatcher, then re-spawns
+# itself before the 6h runner limit — a continuous chain kept alive by
+# workflow_dispatch (which fires reliably via GITHUB_TOKEN). Public repo =
+# unlimited Actions minutes, so a persistent loop is $0.
+#
+# Liveness/redundancy:
+#  - self-respawn keeps the chain going with no external trigger;
+#  - `schedule` (every ~15 min) is a BACKUP that restarts the loop if the chain
+#    ever dies (GitHub cron delays are fine — catch-up covers the gap);
+#  - concurrency cancel-in-progress => exactly one loop ever runs, self-healing.
+on:
+  workflow_dispatch:
+    inputs:
+      dispatch_dry_run:
+        description: "Dispatch run_notebook in dry-run mode (no real client contact)"
+        type: boolean
+        default: false
+  schedule:
+    - cron: '8,23,38,53 * * * *'   # backup bootstrap/recovery (off-peak minutes)
+  push:
+    branches: [main]              # bootstrap the chain immediately on any main update
+                                  # (cancel-in-progress keeps it to a single loop)
+
+permissions:
+  actions: write      # dispatch run_notebook + re-dispatch self via GITHUB_TOKEN
+  contents: read
+
+concurrency:
+  group: heartbeat
+  cancel-in-progress: true   # always exactly one loop; newest wins
+
+jobs:
+  loop:
+    runs-on: ubuntu-latest
+    timeout-minutes: 355       # < 6h; self-respawn happens before this
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+      - name: Install deps
+        run: pip install --quiet psycopg2-binary croniter
+
+      - name: Heartbeat loop — catch-up dispatch every ~2 min, then re-spawn
+        env:
+          DATABASE_URL: ${{ secrets.DATABASE_URL }}
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          GH_REPO: ${{ github.repository }}
+          GH_REF: ${{ github.ref_name }}
+          MAX_CATCHUP_MINUTES: '120'
+          DISPATCH_DRY_RUN: ${{ (github.event_name == 'workflow_dispatch' && inputs.dispatch_dry_run) && '1' || '' }}
+        run: |
+          set -uo pipefail
+          END=$(( $(date +%s) + 5*3600 + 2400 ))   # ~5h40m, then re-spawn
+          while [ "$(date +%s)" -lt "$END" ]; do
+            python scripts/schedule_dispatch.py || echo "::warning::heartbeat tick failed, continuing"
+            sleep 120
+          done
+          echo "Re-dispatching heartbeat to continue the chain…"
+          curl -sS -X POST \
+            -H "Authorization: Bearer $GH_TOKEN" \
+            -H "Accept: application/vnd.github+json" \
+            -H "X-GitHub-Api-Version: 2022-11-28" \
+            "https://api.github.com/repos/$GH_REPO/actions/workflows/heartbeat.yml/dispatches" \
+            -d "{\"ref\":\"$GH_REF\"}"

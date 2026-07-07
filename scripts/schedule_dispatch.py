@@ -1,32 +1,30 @@
 """
-scripts/schedule_dispatch.py — GitHub-native scheduler for the notebook pipelines.
+scripts/schedule_dispatch.py — reliable, catch-up scheduler for the notebook
+pipelines. Driven by heartbeat.yml (a self-perpetuating loop) and, as a backup,
+scheduler.yml's GitHub `schedule` trigger.
 
-Runs on a GitHub Actions `schedule` (every 5 min). Reads every notebook's cron
-schedule from Neon (pipeline_display), figures out which ones are "due" in the
-current window (evaluated in America/New_York, so schedules are US Eastern), and
-dispatches run_notebook.yml for each — directly, using the workflow's own
-GITHUB_TOKEN. No cron-job.org and no dashboard involved.
-
-Why the GITHUB_TOKEN works here: `workflow_dispatch` is an explicit exception to
-GitHub's recursion prevention, so a dispatch made with GITHUB_TOKEN *does* create
-the run_notebook run (given `permissions: actions: write`).
-
-Timeliness note: GitHub-hosted cron can drift (typically minutes, occasionally a
-skipped tick under load). Running every 5 min with a 5-min due-window means a job
-scheduled for 10:15 ET dispatches on the first tick at/after 10:15. It is not
-millisecond-precise — see the caveat in scheduler.yml.
+Design for reliability (not just punctuality):
+- Reads every notebook's cron schedule from Neon (pipeline_display) and evaluates
+  the most recent fire time <= now in America/New_York (US Eastern).
+- CATCH-UP, not a fixed window: a notebook is dispatched if its latest fire time
+  is recent (<= MAX_CATCHUP_MINUTES old) AND hasn't been dispatched yet. So a
+  delayed or skipped heartbeat tick makes a job run slightly late — never
+  silently dropped.
+- DEDUP with no extra infra: "already dispatched" is read from the run_notebook
+  run history itself — run_notebook stamps `"{notebook_id} @{fire_time} …"` into
+  its run-name, and we parse those. No DB writes, no state table, no new secret.
+- Dispatches run_notebook.yml directly via the workflow's GITHUB_TOKEN
+  (workflow_dispatch is a documented recursion exception, so no PAT needed).
 
 Env:
-  DATABASE_URL       Neon connection string (read-only role is fine)
-  GH_TOKEN           token with actions:write (the workflow's GITHUB_TOKEN)
-  GH_REPO            "owner/repo" (github.repository)
-  GH_REF             git ref to dispatch run_notebook.yml on (github.ref_name)
-  WINDOW_MINUTES     due-window in minutes (default 5, match the schedule interval)
-  PLAN_ONLY          "1" → log due notebooks + intended dispatch, make no API calls
-  DISPATCH_DRY_RUN   "1" → dispatch run_notebook with dry_run=true (validation)
-
-Usage:
-  python scripts/schedule_dispatch.py
+  DATABASE_URL        Neon connection string (read-only is fine)
+  GH_TOKEN            token with actions:write (the workflow's GITHUB_TOKEN)
+  GH_REPO             "owner/repo"
+  GH_REF              git ref to dispatch run_notebook.yml on
+  MAX_CATCHUP_MINUTES how stale a fire may be and still be caught up (default 120)
+  PLAN_ONLY           "1" → log due notebooks, make no dispatch calls
+  DISPATCH_DRY_RUN    "1" → dispatch run_notebook with dry_run=true
+  FORCE_NOTEBOOK      dispatch ONE named notebook (dry-run) regardless of schedule
 """
 
 import json
@@ -47,33 +45,65 @@ TZ = ZoneInfo("America/New_York")
 GH_API = "https://api.github.com"
 
 
-def is_due(schedule: str, now: datetime, window_minutes: int) -> bool:
-    """True if `schedule` (5-field cron) fired within the last `window_minutes`.
+def most_recent_fire(schedule: str, now: datetime) -> datetime:
+    """Most recent scheduled fire time <= now, in now's timezone.
 
-    Evaluated in `now`'s timezone (America/New_York). Uses the most recent fire
-    time <= now, so a schedule is caught exactly once by the first tick at/after
-    its time (given ticks are ~window apart)."""
-    # Base at now + 1s so a fire landing exactly on `now` counts as the previous
-    # fire (croniter.get_prev is strict "<"; without this a tick that lands on the
-    # fire minute — or a clean :15/:20 tick pair — would skip the job entirely).
-    itr = croniter(schedule, now + timedelta(seconds=1))
-    prev_fire = itr.get_prev(datetime)
-    delta = now - prev_fire
+    Base at now+1s so a fire landing exactly on `now` counts (croniter.get_prev
+    is strict "<")."""
+    return croniter(schedule, now + timedelta(seconds=1)).get_prev(datetime)
+
+
+def is_due(schedule: str, now: datetime, window_minutes: int) -> bool:
+    """True if `schedule` fired within the last `window_minutes` (legacy window
+    check; catch-up mode below is what the heartbeat uses)."""
+    delta = now - most_recent_fire(schedule, now)
     return timedelta(0) <= delta < timedelta(minutes=window_minutes)
 
 
+def fire_key(notebook_id: str, fire: datetime) -> str:
+    """Canonical dedup key = notebook_id@YYYY-MM-DDTHH:MM (minute precision)."""
+    return f"{notebook_id}@{fire.strftime('%Y-%m-%dT%H:%M')}"
+
+
 def _gryps_url_secret(alias: str) -> str:
-    # Mirrors dashboard dispatch.ts: GRYPS_URL_{ALIAS}. Aliases are codenames
-    # (harbor, ridge, …) — never real client names.
+    # Mirrors dashboard dispatch.ts: GRYPS_URL_{ALIAS}. Aliases are codenames.
     return f"GRYPS_URL_{alias.upper()}"
 
 
-def dispatch_run_notebook(nb: dict, *, repo: str, ref: str, token: str,
-                          dry_run: bool) -> None:
-    """POST a workflow_dispatch for run_notebook.yml. Raises on HTTP error.
+def _parse_run_name_key(title: str) -> str | None:
+    """Extract 'notebook_id@fire' from a run_notebook run-name of the form
+    '<notebook_id> @<fire> (#<n>)…'. Returns None if not a scheduled run."""
+    head = title.split(" (#", 1)[0]
+    if " @" not in head:
+        return None
+    nbid, fire = head.rsplit(" @", 1)
+    nbid, fire = nbid.strip(), fire.strip()
+    return f"{nbid}@{fire}" if nbid and fire else None
 
-    pipeline_name is intentionally NOT sent — it holds real client identity and
-    this repo is public (matches the dashboard's dispatch.ts)."""
+
+def recent_dispatched(repo: str, token: str) -> set[str]:
+    """Set of fire_keys already dispatched, read from recent run_notebook runs
+    (the run history is our dedup store — no DB needed)."""
+    req = urllib.request.Request(
+        f"{GH_API}/repos/{repo}/actions/workflows/run_notebook.yml/runs?per_page=100",
+        headers={"Authorization": f"Bearer {token}",
+                 "Accept": "application/vnd.github+json",
+                 "X-GitHub-Api-Version": "2022-11-28"},
+    )
+    with urllib.request.urlopen(req, timeout=30) as resp:
+        data = json.load(resp)
+    keys = set()
+    for run in data.get("workflow_runs", []):
+        key = _parse_run_name_key(run.get("display_title") or run.get("name") or "")
+        if key:
+            keys.add(key)
+    return keys
+
+
+def dispatch_run_notebook(nb: dict, *, repo: str, ref: str, token: str,
+                          dry_run: bool, fire_iso: str = "") -> None:
+    """POST a workflow_dispatch for run_notebook.yml. Raises on HTTP error.
+    pipeline_name is intentionally NOT sent (real client identity; public repo)."""
     inputs = {
         "notebook_id": nb["notebook_id"],
         "alias": nb["tenant_alias"],
@@ -81,17 +111,16 @@ def dispatch_run_notebook(nb: dict, *, repo: str, ref: str, token: str,
         "notebook_folder": nb.get("notebook_folder") or "",
         "notebook_file": nb.get("notebook_file") or "",
         "dry_run": "true" if dry_run else "false",
+        "fire_time": fire_iso,     # stamped into run-name for dedup
     }
     body = json.dumps({"ref": ref, "inputs": inputs}).encode()
     req = urllib.request.Request(
         f"{GH_API}/repos/{repo}/actions/workflows/run_notebook.yml/dispatches",
         data=body, method="POST",
-        headers={
-            "Authorization": f"Bearer {token}",
-            "Accept": "application/vnd.github+json",
-            "X-GitHub-Api-Version": "2022-11-28",
-            "Content-Type": "application/json",
-        },
+        headers={"Authorization": f"Bearer {token}",
+                 "Accept": "application/vnd.github+json",
+                 "X-GitHub-Api-Version": "2022-11-28",
+                 "Content-Type": "application/json"},
     )
     with urllib.request.urlopen(req, timeout=30) as resp:
         if resp.status not in (201, 204):
@@ -99,7 +128,7 @@ def dispatch_run_notebook(nb: dict, *, repo: str, ref: str, token: str,
 
 
 def load_notebooks(db_url: str) -> list[dict]:
-    import psycopg2  # imported here so unit tests don't need the driver
+    import psycopg2  # local import so unit tests don't need the driver
     conn = psycopg2.connect(db_url)
     try:
         with conn.cursor() as cur:
@@ -121,7 +150,7 @@ def main() -> None:
     repo = os.environ.get("GH_REPO", "")
     ref = os.environ.get("GH_REF", "main")
     token = os.environ.get("GH_TOKEN", "")
-    window = int(os.environ.get("WINDOW_MINUTES", "5"))
+    max_catchup = int(os.environ.get("MAX_CATCHUP_MINUTES", "120"))
     plan_only = os.environ.get("PLAN_ONLY") == "1"
     dispatch_dry = os.environ.get("DISPATCH_DRY_RUN") == "1"
 
@@ -129,52 +158,61 @@ def main() -> None:
         sys.exit("GH_TOKEN is required unless PLAN_ONLY=1")
 
     now = datetime.now(TZ)
-    logger.info(f"Scheduler tick at {now.isoformat()} (America/New_York), "
-                f"window={window}m plan_only={plan_only} dispatch_dry={dispatch_dry}")
+    logger.info(f"Scheduler tick {now.isoformat()} (America/New_York) "
+                f"catchup<={max_catchup}m plan_only={plan_only}")
 
     notebooks = load_notebooks(db_url)
     logger.info(f"{len(notebooks)} scheduled notebook(s) in config")
 
-    # Validation hook: dispatch ONE named notebook (dry_run) regardless of schedule,
-    # to prove the GITHUB_TOKEN → run_notebook dispatch path works.
+    # Validation hook: dispatch ONE named notebook (dry-run), ignore schedule.
     force_id = os.environ.get("FORCE_NOTEBOOK")
     if force_id:
         nb = next((n for n in notebooks if n["notebook_id"] == force_id), None)
         if not nb:
-            sys.exit(f"FORCE_NOTEBOOK {force_id!r} not found in pipeline_display")
-        dispatch_run_notebook(nb, repo=repo, ref=ref, token=token, dry_run=True)
+            sys.exit(f"FORCE_NOTEBOOK {force_id!r} not found")
+        dispatch_run_notebook(nb, repo=repo, ref=ref, token=token, dry_run=True,
+                              fire_iso=now.strftime('%Y-%m-%dT%H:%M'))
         logger.info(f"Force-dispatched {force_id} (dry_run=true) — plumbing OK")
         return
 
-    due, errors = [], []
+    already = recent_dispatched(repo, token) if token else set()
+    dispatched, errors = [], []
     for nb in notebooks:
         if nb.get("paused"):
             continue
         try:
-            if not is_due(nb["schedule"], now, window):
-                continue
-        except Exception as exc:                       # bad cron string → skip, log
-            logger.error(f"[{nb['notebook_id']}] invalid schedule {nb['schedule']!r}: {exc}")
+            fire = most_recent_fire(nb["schedule"], now)
+        except Exception as exc:
+            logger.error(f"[{nb['notebook_id']}] bad schedule {nb['schedule']!r}: {exc}")
             errors.append((nb["notebook_id"], str(exc)))
             continue
 
-        due.append(nb["notebook_id"])
+        age_min = (now - fire).total_seconds() / 60
+        if age_min > max_catchup:
+            continue                              # last fire too old — skip
+        key = fire_key(nb["notebook_id"], fire)
+        if key in already:
+            continue                              # already dispatched this fire
+
         if plan_only:
-            logger.info(f"[due] {nb['notebook_id']} (alias={nb['tenant_alias']}, "
-                        f"schedule={nb['schedule']}) — would dispatch")
+            logger.info(f"[due] {key} (alias={nb['tenant_alias']}, {int(age_min)}m ago) — would dispatch")
+            dispatched.append(key)
             continue
         try:
-            dispatch_run_notebook(nb, repo=repo, ref=ref, token=token, dry_run=dispatch_dry)
-            logger.info(f"Dispatched run_notebook for {nb['notebook_id']} "
-                        f"(dry_run={dispatch_dry})")
+            dispatch_run_notebook(nb, repo=repo, ref=ref, token=token,
+                                  dry_run=dispatch_dry,
+                                  fire_iso=fire.strftime('%Y-%m-%dT%H:%M'))
+            already.add(key)
+            dispatched.append(key)
+            logger.info(f"Dispatched {key} (dry_run={dispatch_dry})")
         except (urllib.error.HTTPError, urllib.error.URLError, RuntimeError) as exc:
             detail = exc.read().decode()[:200] if isinstance(exc, urllib.error.HTTPError) else str(exc)
-            logger.error(f"FAILED dispatch {nb['notebook_id']}: {detail}")
-            errors.append((nb["notebook_id"], detail))
+            logger.error(f"FAILED dispatch {key}: {detail}")
+            errors.append((key, detail))
 
-    logger.info(f"Due this tick: {len(due)} — {due}")
+    logger.info(f"Dispatched this tick: {len(dispatched)} — {dispatched}")
     if errors:
-        logger.error(f"{len(errors)} dispatch error(s): {errors}")
+        logger.error(f"{len(errors)} error(s): {errors}")
         sys.exit(1)
 
 
