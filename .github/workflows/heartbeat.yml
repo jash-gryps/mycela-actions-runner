@@ -1,16 +1,16 @@
 name: heartbeat scheduler
 
 # Reliable scheduler that does NOT depend on GitHub's flaky `schedule:` cadence.
-# A single job loops every ~2 min running the catch-up dispatcher, then re-spawns
-# itself before the 6h runner limit — a continuous chain kept alive by
-# workflow_dispatch (which fires reliably via GITHUB_TOKEN). Public repo =
-# unlimited Actions minutes, so a persistent loop is $0.
+# Each run is ONE short tick — a catch-up dispatch pass, a ~2 min wait, then it
+# re-spawns itself via workflow_dispatch (which fires reliably via GITHUB_TOKEN).
+# That forms a continuous ~2.5-min chain. Short runs (vs one long loop) mean
+# every tick's log is readable, so the run is observable and debuggable.
+# Public repo = unlimited Actions minutes, so the continuous chain is $0.
 #
 # Liveness/redundancy:
-#  - self-respawn keeps the chain going with no external trigger;
-#  - `schedule` (every ~15 min) is a BACKUP that restarts the loop if the chain
-#    ever dies (GitHub cron delays are fine — catch-up covers the gap);
-#  - concurrency cancel-in-progress => exactly one loop ever runs, self-healing.
+#  - re-spawn (with `if: always()`) keeps the chain going even if a tick errors;
+#  - push-to-main + `schedule` (~every 15 min) bootstrap/recover the chain;
+#  - concurrency cancel-in-progress => exactly one tick at a time, self-healing.
 on:
   workflow_dispatch:
     inputs:
@@ -22,20 +22,19 @@ on:
     - cron: '8,23,38,53 * * * *'   # backup bootstrap/recovery (off-peak minutes)
   push:
     branches: [main]              # bootstrap the chain immediately on any main update
-                                  # (cancel-in-progress keeps it to a single loop)
 
 permissions:
-  actions: write      # dispatch run_notebook + re-dispatch self via GITHUB_TOKEN
+  actions: write      # dispatch run_notebook + re-spawn self via GITHUB_TOKEN
   contents: read
 
 concurrency:
   group: heartbeat
-  cancel-in-progress: true   # always exactly one loop; newest wins
+  cancel-in-progress: true   # exactly one tick chain; newest wins
 
 jobs:
-  loop:
+  tick:
     runs-on: ubuntu-latest
-    timeout-minutes: 355       # < 6h; self-respawn happens before this
+    timeout-minutes: 8
     steps:
       - uses: actions/checkout@v4
       - uses: actions/setup-python@v5
@@ -44,7 +43,7 @@ jobs:
       - name: Install deps
         run: pip install --quiet psycopg2-binary croniter
 
-      - name: Heartbeat loop — catch-up dispatch every ~2 min, then re-spawn
+      - name: Catch-up dispatch pass
         env:
           DATABASE_URL: ${{ secrets.DATABASE_URL }}
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
@@ -52,14 +51,16 @@ jobs:
           GH_REF: ${{ github.ref_name }}
           MAX_CATCHUP_MINUTES: '120'
           DISPATCH_DRY_RUN: ${{ (github.event_name == 'workflow_dispatch' && inputs.dispatch_dry_run) && '1' || '' }}
+        run: python scripts/schedule_dispatch.py
+
+      - name: Wait ~2 min, then re-spawn the next tick
+        if: always()   # keep the chain alive even if the dispatch pass errored
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          GH_REPO: ${{ github.repository }}
+          GH_REF: ${{ github.ref_name }}
         run: |
-          set -uo pipefail
-          END=$(( $(date +%s) + 5*3600 + 2400 ))   # ~5h40m, then re-spawn
-          while [ "$(date +%s)" -lt "$END" ]; do
-            python scripts/schedule_dispatch.py || echo "::warning::heartbeat tick failed, continuing"
-            sleep 120
-          done
-          echo "Re-dispatching heartbeat to continue the chain…"
+          sleep 120
           curl -sS -X POST \
             -H "Authorization: Bearer $GH_TOKEN" \
             -H "Accept: application/vnd.github+json" \
