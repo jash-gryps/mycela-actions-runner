@@ -40,6 +40,25 @@ from datetime import datetime, timezone
 API = "https://console.neon.tech/api/v2"
 
 
+def annotate(level: str, message: str) -> None:
+    """Emit a GitHub Actions annotation, so a green run can still say something.
+
+    An unconfigured guard exits 0 and the daily run shows a green tick forever
+    while protecting nothing — the exact silent-success pattern that let the
+    original outage build for 24 days. Failing an unconfigured check would be
+    worse (a permanently red repo gets ignored), so instead the run stays green
+    and carries a visible warning annotation plus a job-summary line.
+    """
+    print(f"::{level}::{message}")
+    summary = os.environ.get("GITHUB_STEP_SUMMARY")
+    if summary:
+        try:
+            with open(summary, "a", encoding="utf-8") as fh:
+                fh.write(f"**{level.upper()}** — {message}\n\n")
+        except OSError:
+            pass  # a summary that cannot be written must not fail the check
+
+
 def _iso(ts: str) -> datetime:
     return datetime.fromisoformat(ts.replace("Z", "+00:00"))
 
@@ -63,8 +82,11 @@ def main() -> int:
     api_key = os.environ.get("NEON_API_KEY", "").strip()
     project_id = os.environ.get("NEON_PROJECT_ID", "").strip()
     if not api_key:
-        print("NEON_API_KEY not set — skipping budget check (not a failure).")
-        print("Set the secret to enable early warning of quota exhaustion.")
+        annotate("warning",
+                 "Neon budget guard is NOT ACTIVE: the NEON_API_KEY secret is "
+                 "unset, so nothing is watching compute consumption. This run is "
+                 "green because the check skipped, not because usage is healthy. "
+                 "Set NEON_API_KEY and NEON_PROJECT_ID on this repo to arm it.")
         return 0
     if not project_id:
         sys.exit("NEON_PROJECT_ID is required when NEON_API_KEY is set")
