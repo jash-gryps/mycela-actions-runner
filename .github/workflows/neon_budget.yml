@@ -1,0 +1,43 @@
+name: Neon budget check
+
+# Early warning for Neon compute-quota exhaustion.
+#
+# On 2026-08-25 the free-tier compute quota ran out. Neon began refusing every
+# connection, so all dashboard logins failed as "Invalid username or password"
+# and the notebook fleet stopped after run #1678. Nothing warned anyone — the
+# outage was discovered three days later by a user who could not sign in.
+#
+# This job projects the period's compute usage to the period end and FAILS while
+# there is still time to act. GitHub emails the repo owner when a scheduled
+# workflow fails, so this needs no extra alerting wiring.
+#
+# It uses only a read-only Neon API call and never touches the database, so it
+# keeps working even when the quota is already exhausted.
+
+on:
+  schedule:
+    - cron: '19 7 * * *'   # daily, 07:19 UTC
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  budget:
+    name: "Project compute usage to period end"
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+      # No pip install: the script is stdlib-only on purpose, so this check
+      # cannot be broken by a dependency problem.
+      - name: Check Neon compute budget
+        env:
+          NEON_API_KEY: ${{ secrets.NEON_API_KEY }}
+          NEON_PROJECT_ID: ${{ secrets.NEON_PROJECT_ID }}
+          NEON_BUDGET_CU_HOURS: '100'
+          NEON_WARN_FRACTION: '0.8'
+        run: python scripts/check_neon_budget.py

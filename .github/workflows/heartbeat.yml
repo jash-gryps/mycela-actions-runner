@@ -1,11 +1,29 @@
 name: heartbeat scheduler
 
 # Reliable scheduler that does NOT depend on GitHub's flaky `schedule:` cadence.
-# Each run is ONE short tick — a catch-up dispatch pass, a ~2 min wait, then it
-# re-spawns itself via workflow_dispatch (which fires reliably via GITHUB_TOKEN).
-# That forms a continuous ~2.5-min chain. Short runs (vs one long loop) mean
-# every tick's log is readable, so the run is observable and debuggable.
-# Public repo = unlimited Actions minutes, so the continuous chain is $0.
+# Each run is ONE tick — a catch-up dispatch pass, a wait, then it re-spawns
+# itself via workflow_dispatch (which fires reliably via GITHUB_TOKEN). That
+# forms a continuous chain. Short runs (vs one long loop) mean every tick's log
+# is readable, so the run is observable and debuggable.
+#
+# TICK_INTERVAL IS A COST CONTROL — DO NOT SHORTEN IT WITHOUT READING THIS.
+# Public repo = unlimited Actions minutes, so the chain is $0 on GitHub. But
+# every tick runs schedule_dispatch.py, which OPENS A CONNECTION TO NEON. Neon
+# bills compute by how long an endpoint stays awake, and an endpoint only
+# suspends after `suspend_timeout_seconds` of idle. A tick interval shorter than
+# that timeout means the endpoint can NEVER suspend — it is pinned awake 24/7.
+#
+# That is exactly what happened: a ~2.5-min tick against the default 300s
+# suspend timeout kept prod awake ~100% of the time, burned the Neon free
+# monthly compute quota by 2026-08-25, and took the whole system down — every
+# dashboard login started failing as "Invalid username or password" and the
+# notebook fleet stopped after run #1678.
+#
+# Keep BOTH of these true, or the quota goes again:
+#   1. this interval stays comfortably ABOVE the endpoint's suspend timeout, and
+#   2. the endpoint's suspend_timeout_seconds stays low (60s).
+# At 15 min / 60s the scheduler costs ~1.6 h/day of awake time; the notebook
+# runs themselves add ~3.8 h/day. Budget is ~13 h/day. See docs/NEON_BUDGET.md.
 #
 # Liveness/redundancy:
 #  - re-spawn (with `if: always()`) keeps the chain going even if a tick errors;
@@ -19,7 +37,9 @@ on:
         type: boolean
         default: false
   schedule:
-    - cron: '8,23,38,53 * * * *'   # backup bootstrap/recovery (off-peak minutes)
+    - cron: '7 * * * *'   # hourly bootstrap/recovery only. NOT more often: a
+                          # tick now lasts ~15 min and `cancel-in-progress` would
+                          # kill a healthy in-flight tick on every scheduled fire.
   push:
     branches: [main]              # bootstrap the chain immediately on any main update
 
@@ -34,7 +54,7 @@ concurrency:
 jobs:
   tick:
     runs-on: ubuntu-latest
-    timeout-minutes: 8
+    timeout-minutes: 20
     steps:
       - uses: actions/checkout@v4
       - uses: actions/setup-python@v5
@@ -53,14 +73,14 @@ jobs:
           DISPATCH_DRY_RUN: ${{ (github.event_name == 'workflow_dispatch' && inputs.dispatch_dry_run) && '1' || '' }}
         run: python scripts/schedule_dispatch.py
 
-      - name: Wait ~2 min, then re-spawn the next tick
+      - name: Wait ~15 min, then re-spawn the next tick
         if: always()   # keep the chain alive even if the dispatch pass errored
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
           GH_REPO: ${{ github.repository }}
           GH_REF: ${{ github.ref_name }}
         run: |
-          sleep 120
+          sleep 900
           curl -sS -X POST \
             -H "Authorization: Bearer $GH_TOKEN" \
             -H "Accept: application/vnd.github+json" \
